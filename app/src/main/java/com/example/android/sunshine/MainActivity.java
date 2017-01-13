@@ -168,6 +168,8 @@ public class MainActivity extends AppCompatActivity implements
             .addOnConnectionFailedListener(this)
             .build();
 
+        mGoogleApiClient.connect();
+
     }
 
     /**
@@ -367,6 +369,12 @@ public class MainActivity extends AppCompatActivity implements
     @Override
     protected void onPause() {
         super.onPause();
+        mGoogleApiClient.disconnect();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
         mGoogleApiClient.disconnect();
     }
 
