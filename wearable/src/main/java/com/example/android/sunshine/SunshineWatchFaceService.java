@@ -24,6 +24,7 @@ import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
@@ -31,9 +32,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.support.wearable.watchface.CanvasWatchFaceService;
-import android.support.wearable.watchface.WatchFaceService;
 import android.support.wearable.watchface.WatchFaceStyle;
-import android.text.format.DateFormat;
 import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.WindowInsets;
@@ -48,142 +47,97 @@ import com.google.android.gms.wearable.DataMap;
 import com.google.android.gms.wearable.DataMapItem;
 import com.google.android.gms.wearable.Wearable;
 
+import java.lang.ref.WeakReference;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
-import java.util.Date;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Digital watch face with seconds. In ambient mode, the seconds aren't displayed. On devices with
+ * low-bit ambient mode, the text is drawn without anti-aliasing in ambient mode.
+ */
 public class SunshineWatchFaceService extends CanvasWatchFaceService {
-  private static final String TAG = "WatchFaceService";
-
-  private static final Typeface BOLD_TYPEFACE =
-      Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD);
   private static final Typeface NORMAL_TYPEFACE =
       Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL);
 
   /**
-   * Update rate in milliseconds for normal (not ambient and not mute) mode. We update twice
-   * a second to blink the colons.
+   * Update rate in milliseconds for interactive mode. We update once a second since seconds are
+   * displayed in interactive mode.
    */
-  private static final long NORMAL_UPDATE_RATE_MS = 500;
+  private static final long INTERACTIVE_UPDATE_RATE_MS = TimeUnit.SECONDS.toMillis(500);
 
   /**
-   * Update rate in milliseconds for mute mode. We update every minute, like in ambient mode.
+   * Handler message id for updating the time periodically in interactive mode.
    */
-  private static final long MUTE_UPDATE_RATE_MS = TimeUnit.MINUTES.toMillis(1);
+  private static final int MSG_UPDATE_TIME = 0;
+
+  private static final String KEY_WEATHER_ID = "WEATHER_ID";
+  private static final String KEY_MAX_TEMPERATURE = "MAX_TEMPERATURE";
+  private static final String KEY_MIN_TEMPERATURE = "MIN_TEMPERATURE";
+  private static final String WEATHER_DATA_PATH = "/WEATHER_DATA_PATH";
 
   @Override
   public Engine onCreateEngine() {
     return new Engine();
   }
 
-  private class Engine extends CanvasWatchFaceService.Engine implements DataApi.DataListener,
-      GoogleApiClient.ConnectionCallbacks, GoogleApiClient.OnConnectionFailedListener {
-    static final String COLON_STRING = ":";
+  private static class EngineHandler extends Handler {
+    private final WeakReference<SunshineWatchFaceService.Engine> mWeakReference;
 
-    /**
-     * Alpha value for drawing time when in mute mode.
-     */
-    static final int MUTE_ALPHA = 100;
+    public EngineHandler(SunshineWatchFaceService.Engine reference) {
+      mWeakReference = new WeakReference<>(reference);
+    }
 
-    /**
-     * Alpha value for drawing time when not in mute mode.
-     */
-    static final int NORMAL_ALPHA = 255;
-
-    static final int MSG_UPDATE_TIME = 0;
-
-    /**
-     * Weather information from the mobile app
-     */
-    static final String KEY_PATH = "/weather";
-    static final String KEY_WEATHER_ID = "KEY_WEATHER_ID";
-    static final String KEY_MAX_TEMP = "KEY_MAX_TEMP";
-    static final String KEY_MIN_TEMP = "KEY_MIN_TEMP";
-
-    private Bitmap mWeatherImage;
-    private String mWeatherMaxTemp = "00";
-    private String mWeatherMinTemp = "00";
-
-    /**
-     * How often {@link #mUpdateTimeHandler} ticks in milliseconds.
-     */
-    long mInteractiveUpdateRateMs = NORMAL_UPDATE_RATE_MS;
-
-    /**
-     * Handler to update the time periodically in interactive mode.
-     */
-    final Handler mUpdateTimeHandler = new Handler() {
-      @Override
-      public void handleMessage(Message message) {
-        switch (message.what) {
+    @Override
+    public void handleMessage(Message msg) {
+      SunshineWatchFaceService.Engine engine = mWeakReference.get();
+      if (engine != null) {
+        switch (msg.what) {
           case MSG_UPDATE_TIME:
-            if (Log.isLoggable(TAG, Log.VERBOSE)) {
-              Log.v(TAG, "updating time");
-            }
-            invalidate();
-            if (shouldTimerBeRunning()) {
-              long timeMs = System.currentTimeMillis();
-              long delayMs =
-                  mInteractiveUpdateRateMs - (timeMs % mInteractiveUpdateRateMs);
-              mUpdateTimeHandler.sendEmptyMessageDelayed(MSG_UPDATE_TIME, delayMs);
-            }
+            engine.handleUpdateTimeMessage();
             break;
         }
       }
-    };
+    }
+  }
 
-    GoogleApiClient mGoogleApiClient = new GoogleApiClient.Builder(SunshineWatchFaceService.this)
-        .addConnectionCallbacks(this)
-        .addOnConnectionFailedListener(this)
-        .addApi(Wearable.API)
-        .build();
+  private class Engine extends CanvasWatchFaceService.Engine implements
+      GoogleApiClient.ConnectionCallbacks, GoogleApiClient.OnConnectionFailedListener, DataApi.DataListener {
+    final static String TAG = "SunshineFaceWatchEngine";
+    final Handler mUpdateTimeHandler = new EngineHandler(this);
+    boolean mRegisteredTimeZoneReceiver = false;
+    Paint mBackgroundPaint;
+    Paint mTextPaint;
+    Paint mDayAndDatePaint;
+    Paint mLineSeparator;
+    Bitmap mWeatherBitmap;
+    Paint mWeatherBitmapPaint;
+    Paint mMaxTemperaturePaint;
+    Paint mMinTemperaturePaint;
+    String mMaxTemperatureString;
+    String mMinTemperatureString;
 
-    /**
-     * Handles time zone and locale changes.
-     */
-    final BroadcastReceiver mReceiver = new BroadcastReceiver() {
+    boolean mAmbient;
+    Calendar mCalendar;
+    SimpleDateFormat mDayOfWeekFormat;
+    java.text.DateFormat mDateFormat;
+    final BroadcastReceiver mTimeZoneReceiver = new BroadcastReceiver() {
       @Override
       public void onReceive(Context context, Intent intent) {
         mCalendar.setTimeZone(TimeZone.getDefault());
-        initFormats();
         invalidate();
       }
     };
-
-    /**
-     * Unregistering an unregistered receiver throws an exception. Keep track of the
-     * registration state to prevent that.
-     */
-    boolean mRegisteredReceiver = false;
-
-    Paint mBackgroundPaint;
-    Paint mDatePaint;
-    Paint mHourPaint;
-    Paint mMinutePaint;
-    Paint mColonPaint;
-    Paint mMinTempPaint;
-    Paint mMaxTempPaint;
-    float mColonWidth;
-    boolean mMute;
-
-    Calendar mCalendar;
-    Date mDate;
-    SimpleDateFormat mDayOfWeekFormat;
-    java.text.DateFormat mDateFormat;
-
-    boolean mShouldDrawColons;
     float mXOffset;
     float mYOffset;
-    float mLineHeight;
-    int mInteractiveBackgroundColor =
-        SunshineWatchFaceUtility.COLOR_VALUE_DEFAULT_AND_AMBIENT_BACKGROUND;
-    int mInteractiveHourDigitsColor =
-        SunshineWatchFaceUtility.COLOR_VALUE_DEFAULT_AND_AMBIENT_HOUR_DIGITS;
-    int mInteractiveMinuteDigitsColor =
-        SunshineWatchFaceUtility.COLOR_VALUE_DEFAULT_AND_AMBIENT_MINUTE_DIGITS;
+    float mSpacing;
+    float mLineYOffset;
+    int mWeatherBitmapWidth;
+    int mWeatherBitmapHeight;
+
+    GoogleApiClient mGoogleApiClient;
 
     /**
      * Whether the display supports fewer bits for each color in ambient mode. When true, we
@@ -193,36 +147,57 @@ public class SunshineWatchFaceService extends CanvasWatchFaceService {
 
     @Override
     public void onCreate(SurfaceHolder holder) {
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onCreate");
-      }
       super.onCreate(holder);
 
       setWatchFaceStyle(new WatchFaceStyle.Builder(SunshineWatchFaceService.this)
           .setCardPeekMode(WatchFaceStyle.PEEK_MODE_VARIABLE)
           .setBackgroundVisibility(WatchFaceStyle.BACKGROUND_VISIBILITY_INTERRUPTIVE)
           .setShowSystemUiTime(false)
+          .setAcceptsTapEvents(true)
           .build());
       Resources resources = SunshineWatchFaceService.this.getResources();
       mYOffset = resources.getDimension(R.dimen.digital_y_offset);
-      mLineHeight = resources.getDimension(R.dimen.digital_line_height);
-
-      mInteractiveBackgroundColor = getResources().getColor(R.color.primary);
+      mSpacing = resources.getDimension(R.dimen.spacing_y_offset);
+      mLineYOffset = mYOffset + (2 * mSpacing);
+      mWeatherBitmapHeight = (int) resources.getDimension(R.dimen.weather_image_height);
+      mWeatherBitmapWidth = (int) resources.getDimension(R.dimen.weather_image_width);
+      mMaxTemperatureString = "00";
+      mMinTemperatureString = "00";
 
       mBackgroundPaint = new Paint();
-      mBackgroundPaint.setColor(mInteractiveBackgroundColor);
-      mDatePaint = createTextPaint(resources.getColor(R.color.digital_date));
-      mHourPaint = createTextPaint(mInteractiveHourDigitsColor, BOLD_TYPEFACE);
-      mMinutePaint = createTextPaint(mInteractiveMinuteDigitsColor);
-      mMaxTempPaint = createTextPaint(resources.getColor(R.color.digital_temp), BOLD_TYPEFACE);
-      mMinTempPaint = createTextPaint(resources.getColor(R.color.digital_temp));
-      mColonPaint = createTextPaint(resources.getColor(R.color.digital_colons));
+      mBackgroundPaint.setColor(resources.getColor(R.color.background));
+
+      mTextPaint = new Paint();
+      mTextPaint = createTextPaint(resources.getColor(R.color.digital_primary_text));
+
+      mDayAndDatePaint = new Paint();
+      mDayAndDatePaint = createTextPaint(resources.getColor(R.color.digital_secondary_text));
+
+      mLineSeparator = new Paint();
+      mLineSeparator.setColor(resources.getColor(R.color.digital_secondary_text));
 
       mCalendar = Calendar.getInstance();
-      mDate = new Date();
-      mWeatherImage = BitmapFactory.decodeResource(getResources(),
+      mDayOfWeekFormat = new SimpleDateFormat("EEE", Locale.getDefault());
+      mDayOfWeekFormat.setCalendar(mCalendar);
+      mDateFormat = new SimpleDateFormat("MMM d yyyy", Locale.getDefault());
+      mDateFormat.setCalendar(mCalendar);
+
+      mWeatherBitmap = BitmapFactory.decodeResource(getResources(),
           R.mipmap.ic_launcher);
-      initFormats();
+
+      mWeatherBitmapPaint = new Paint();
+
+      mMaxTemperaturePaint = new Paint();
+      mMaxTemperaturePaint = createTextPaint(resources.getColor(R.color.digital_primary_text));
+
+      mMinTemperaturePaint = new Paint();
+      mMinTemperaturePaint = createTextPaint(resources.getColor(R.color.digital_secondary_text));
+
+      mGoogleApiClient = new GoogleApiClient.Builder(SunshineWatchFaceService.this)
+          .addConnectionCallbacks(this)
+          .addOnConnectionFailedListener(this)
+          .addApi(Wearable.API)
+          .build();
     }
 
     @Override
@@ -231,40 +206,26 @@ public class SunshineWatchFaceService extends CanvasWatchFaceService {
       super.onDestroy();
     }
 
-    private Paint createTextPaint(int defaultInteractiveColor) {
-      return createTextPaint(defaultInteractiveColor, NORMAL_TYPEFACE);
-    }
-
-    private Paint createTextPaint(int defaultInteractiveColor, Typeface typeface) {
+    private Paint createTextPaint(int textColor) {
       Paint paint = new Paint();
-      paint.setColor(defaultInteractiveColor);
-      paint.setTypeface(typeface);
+      paint.setColor(textColor);
+      paint.setTypeface(NORMAL_TYPEFACE);
       paint.setAntiAlias(true);
       return paint;
     }
 
     @Override
     public void onVisibilityChanged(boolean visible) {
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onVisibilityChanged: " + visible);
-      }
       super.onVisibilityChanged(visible);
 
       if (visible) {
-        mGoogleApiClient.connect();
-
         registerReceiver();
 
-        // Update time zone and date formats, in case they changed while we weren't visible.
+        // Update time zone in case it changed while we weren't visible.
         mCalendar.setTimeZone(TimeZone.getDefault());
-        initFormats();
+        invalidate();
       } else {
         unregisterReceiver();
-
-        if (mGoogleApiClient != null && mGoogleApiClient.isConnected()) {
-          Wearable.DataApi.removeListener(mGoogleApiClient, this);
-          mGoogleApiClient.disconnect();
-        }
       }
 
       // Whether the timer should be running depends on whether we're visible (as well as
@@ -272,37 +233,31 @@ public class SunshineWatchFaceService extends CanvasWatchFaceService {
       updateTimer();
     }
 
-    private void initFormats() {
-      mDayOfWeekFormat = new SimpleDateFormat("EEE", Locale.getDefault());
-      mDayOfWeekFormat.setCalendar(mCalendar);
-//            mDateFormat = DateFormat.getDateFormat(SunshineWatchFaceService.this);
-      mDateFormat = new SimpleDateFormat("MMM d yy", Locale.getDefault());
-      mDateFormat.setCalendar(mCalendar);
-    }
-
     private void registerReceiver() {
-      if (mRegisteredReceiver) {
+      if (mRegisteredTimeZoneReceiver) {
         return;
       }
-      mRegisteredReceiver = true;
+      mRegisteredTimeZoneReceiver = true;
       IntentFilter filter = new IntentFilter(Intent.ACTION_TIMEZONE_CHANGED);
-      filter.addAction(Intent.ACTION_LOCALE_CHANGED);
-      SunshineWatchFaceService.this.registerReceiver(mReceiver, filter);
+      SunshineWatchFaceService.this.registerReceiver(mTimeZoneReceiver, filter);
+      mGoogleApiClient.connect();
     }
 
     private void unregisterReceiver() {
-      if (!mRegisteredReceiver) {
+      if (!mRegisteredTimeZoneReceiver) {
         return;
       }
-      mRegisteredReceiver = false;
-      SunshineWatchFaceService.this.unregisterReceiver(mReceiver);
+      mRegisteredTimeZoneReceiver = false;
+      SunshineWatchFaceService.this.unregisterReceiver(mTimeZoneReceiver);
+      if (mGoogleApiClient != null && mGoogleApiClient.isConnected()) {
+        Wearable.DataApi.removeListener(mGoogleApiClient, this);
+        mGoogleApiClient.disconnect();
+        Log.i(TAG, "unregisterReceiver: Disconnected");
+      }
     }
 
     @Override
     public void onApplyWindowInsets(WindowInsets insets) {
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onApplyWindowInsets: " + (insets.isRound() ? "round" : "square"));
-      }
       super.onApplyWindowInsets(insets);
 
       // Load resources that have alternate values for round watches.
@@ -312,198 +267,93 @@ public class SunshineWatchFaceService extends CanvasWatchFaceService {
           ? R.dimen.digital_x_offset_round : R.dimen.digital_x_offset);
       float textSize = resources.getDimension(isRound
           ? R.dimen.digital_text_size_round : R.dimen.digital_text_size);
-      float tempSize = resources.getDimension(isRound
-          ? R.dimen.digital_temp_size_round : R.dimen.digital_temp_size);
 
-      mDatePaint.setTextSize(resources.getDimension(R.dimen.digital_date_text_size));
-      mHourPaint.setTextSize(textSize);
-      mMinutePaint.setTextSize(textSize);
-      mMaxTempPaint.setTextSize(tempSize);
-      mMinTempPaint.setTextSize(tempSize);
-      mColonPaint.setTextSize(textSize);
-
-      mColonWidth = mColonPaint.measureText(COLON_STRING);
+      mTextPaint.setTextSize(textSize);
+      mDayAndDatePaint.setTextSize(textSize / 2.5f);
+      mMaxTemperaturePaint.setTextSize(textSize / 2f);
+      mMinTemperaturePaint.setTextSize(textSize / 2f);
     }
 
     @Override
     public void onPropertiesChanged(Bundle properties) {
       super.onPropertiesChanged(properties);
-
-      boolean burnInProtection = properties.getBoolean(PROPERTY_BURN_IN_PROTECTION, false);
-      mHourPaint.setTypeface(burnInProtection ? NORMAL_TYPEFACE : BOLD_TYPEFACE);
-
       mLowBitAmbient = properties.getBoolean(PROPERTY_LOW_BIT_AMBIENT, false);
-
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onPropertiesChanged: burn-in protection = " + burnInProtection
-            + ", low-bit ambient = " + mLowBitAmbient);
-      }
     }
 
     @Override
     public void onTimeTick() {
       super.onTimeTick();
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onTimeTick: ambient = " + isInAmbientMode());
-      }
       invalidate();
     }
 
     @Override
     public void onAmbientModeChanged(boolean inAmbientMode) {
       super.onAmbientModeChanged(inAmbientMode);
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onAmbientModeChanged: " + inAmbientMode);
-      }
-      adjustPaintColorToCurrentMode(mHourPaint, mInteractiveHourDigitsColor,
-          SunshineWatchFaceUtility.COLOR_VALUE_DEFAULT_AND_AMBIENT_HOUR_DIGITS);
-      adjustPaintColorToCurrentMode(mMinutePaint, mInteractiveMinuteDigitsColor,
-          SunshineWatchFaceUtility.COLOR_VALUE_DEFAULT_AND_AMBIENT_MINUTE_DIGITS);
-      // Actually, the seconds are not rendered in the ambient mode, so we could pass just any
-      // value as ambientColor here.
+      if (mAmbient != inAmbientMode) {
+        mAmbient = inAmbientMode;
+        if (mLowBitAmbient) {
+          mTextPaint.setAntiAlias(!inAmbientMode);
+          mDayAndDatePaint.setAntiAlias(!inAmbientMode);
+          mLineSeparator.setAntiAlias(!inAmbientMode);
+          mMaxTemperaturePaint.setAntiAlias(!inAmbientMode);
+          mMinTemperaturePaint.setAntiAlias(!inAmbientMode);
+          mWeatherBitmapPaint.setAntiAlias(!inAmbientMode);
+          mWeatherBitmapPaint.setFilterBitmap(!inAmbientMode);
 
-      if (mLowBitAmbient) {
-        boolean antiAlias = !inAmbientMode;
-        mDatePaint.setAntiAlias(antiAlias);
-        mHourPaint.setAntiAlias(antiAlias);
-        mMinutePaint.setAntiAlias(antiAlias);
-        mMaxTempPaint.setAntiAlias(antiAlias);
-        mMinTempPaint.setAntiAlias(antiAlias);
-        mColonPaint.setAntiAlias(antiAlias);
-      }
-      invalidate();
-
-      // Whether the timer should be running depends on whether we're in ambient mode (as well
-      // as whether we're visible), so we may need to start or stop the timer.
-      updateTimer();
-    }
-
-    private void adjustPaintColorToCurrentMode(Paint paint, int interactiveColor,
-                                               int ambientColor) {
-      paint.setColor(isInAmbientMode() ? ambientColor : interactiveColor);
-    }
-
-    @Override
-    public void onInterruptionFilterChanged(int interruptionFilter) {
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onInterruptionFilterChanged: " + interruptionFilter);
-      }
-      super.onInterruptionFilterChanged(interruptionFilter);
-
-      boolean inMuteMode = interruptionFilter == WatchFaceService.INTERRUPTION_FILTER_NONE;
-      // We only need to update once a minute in mute mode.
-      setInteractiveUpdateRateMs(inMuteMode ? MUTE_UPDATE_RATE_MS : NORMAL_UPDATE_RATE_MS);
-
-      if (mMute != inMuteMode) {
-        mMute = inMuteMode;
-        int alpha = inMuteMode ? MUTE_ALPHA : NORMAL_ALPHA;
-        mDatePaint.setAlpha(alpha);
-        mHourPaint.setAlpha(alpha);
-        mMinutePaint.setAlpha(alpha);
-        mColonPaint.setAlpha(alpha);
-        mMaxTempPaint.setAlpha(alpha);
-        mMinTempPaint.setAlpha(alpha);
+        }
         invalidate();
       }
-    }
 
-    public void setInteractiveUpdateRateMs(long updateRateMs) {
-      if (updateRateMs == mInteractiveUpdateRateMs) {
-        return;
-      }
-      mInteractiveUpdateRateMs = updateRateMs;
-
-      // Stop and restart the timer so the new update rate takes effect immediately.
-      if (shouldTimerBeRunning()) {
-        updateTimer();
-      }
-    }
-
-    private void updatePaintIfInteractive(Paint paint, int interactiveColor) {
-      if (!isInAmbientMode() && paint != null) {
-        paint.setColor(interactiveColor);
-      }
-    }
-
-    private void setInteractiveHourDigitsColor(int color) {
-      mInteractiveHourDigitsColor = color;
-      updatePaintIfInteractive(mHourPaint, color);
-    }
-
-    private void setInteractiveMinuteDigitsColor(int color) {
-      mInteractiveMinuteDigitsColor = color;
-      updatePaintIfInteractive(mMinutePaint, color);
-    }
-
-    private String formatTwoDigitNumber(int hour) {
-      return String.format("%02d", hour);
+      // Whether the timer should be running depends on whether we're visible (as well as
+      // whether we're in ambient mode), so we may need to start or stop the timer.
+      updateTimer();
     }
 
     @Override
     public void onDraw(Canvas canvas, Rect bounds) {
+      // Draw the background.
+      if (isInAmbientMode()) {
+        canvas.drawColor(Color.BLACK);
+      } else {
+        canvas.drawRect(0, 0, bounds.width(), bounds.height(), mBackgroundPaint);
+      }
+
+      // Draw H:MM in ambient mode or H:MM:SS in interactive mode.
       long now = System.currentTimeMillis();
       mCalendar.setTimeInMillis(now);
-      mDate.setTime(now);
-      boolean is24Hour = DateFormat.is24HourFormat(SunshineWatchFaceService.this);
 
-      int width = bounds.width();
-      int height = bounds.height();
-      float centerX = width / 2f;
-      float centerY = height / 2f;
+      // Draw Time
+      String text = String.format("%d:%02d", mCalendar.get(Calendar.HOUR_OF_DAY),
+          mCalendar.get(Calendar.MINUTE));
+      canvas.drawText(text, mXOffset, mYOffset, mTextPaint);
 
-      // Show colons for the first half of each second so the colons blink on when the time
-      // updates.
-      mShouldDrawColons = (System.currentTimeMillis() % 1000) < 500;
+      // Draw Date
+      float quarterWidth = bounds.width() / 4f;
+      String dayAndDate = mDayOfWeekFormat.format(now) + ", " + mDateFormat.format(now);
+      float datePosition = (2f * quarterWidth) - mDayAndDatePaint.measureText(dayAndDate) / 2;
+      canvas.drawText(dayAndDate, datePosition, mYOffset + mSpacing, mDayAndDatePaint);
 
-      // Draw the background.
-      canvas.drawRect(0, 0, bounds.width(), bounds.height(), mBackgroundPaint);
+      // Draw Line
+      float eighthWidth = quarterWidth / 2;
+      float x1 = 3 * eighthWidth;
+      float x2 = 5 * eighthWidth;
+      canvas.drawLine(x1, mLineYOffset, x2, mLineYOffset, mLineSeparator);
 
-      // Draw the hours.
-      float x = mXOffset;
-      String hourString;
-      if (is24Hour) {
-        hourString = formatTwoDigitNumber(mCalendar.get(Calendar.HOUR_OF_DAY));
-      } else {
-        int hour = mCalendar.get(Calendar.HOUR);
-        if (hour == 0) {
-          hour = 12;
-        }
-        hourString = String.format("%02d", hour);
-      }
-      canvas.drawText(hourString, centerX - mHourPaint.measureText(hourString), mYOffset, mHourPaint);
+      // Draw Weather Bitmap
+      Bitmap drawableWeatherBitmap = Bitmap.createScaledBitmap(mWeatherBitmap,
+          mWeatherBitmapWidth, mWeatherBitmapHeight, true);
+      float bitmapXOffset = x1 - drawableWeatherBitmap.getWidth() * 1.5f;
+      canvas.drawBitmap(drawableWeatherBitmap, bitmapXOffset,
+          mLineYOffset + 2 * mSpacing - drawableWeatherBitmap.getHeight(), mWeatherBitmapPaint);
 
-      // In ambient and mute modes, always draw the first colon. Otherwise, draw the
-      // first colon for the first half of each second.
-      if (isInAmbientMode() || mMute || mShouldDrawColons) {
-        canvas.drawText(COLON_STRING, centerX, mYOffset, mColonPaint);
-      }
+      // Draw Temperature Text
+      String maxTemperatureString = mMaxTemperatureString + "\u00b0";
+      String minTemperatureString = mMinTemperatureString + "\u00b0";
 
-      // Draw the minutes.
-      String minuteString = formatTwoDigitNumber(mCalendar.get(Calendar.MINUTE));
-      canvas.drawText(minuteString, centerX + mColonPaint.measureText(COLON_STRING), mYOffset, mMinutePaint);
-
-      // Only render the day of week and date if there is no peek card, so they do not bleed
-      // into each other in ambient mode.
-      if (getPeekCardPosition().isEmpty()) {
-        // Date
-        String dateString = mDayOfWeekFormat.format(mDate) + ", " + mDateFormat.format(mDate);
-        float datePosition = centerX - mDatePaint.measureText(dateString) / 2;
-        canvas.drawText(dateString, datePosition, mYOffset + mLineHeight, mDatePaint);
-        // Weather
-        Bitmap resizedBitmap = Bitmap.createScaledBitmap(mWeatherImage, 40, 40, true);
-        String maxTempString = mWeatherMaxTemp + "\u00b0";
-        String minTempString = mWeatherMinTemp + "\u00b0";
-        float imgPosition = centerX - resizedBitmap.getWidth() - mMinTempPaint.measureText(minTempString) / 2 - 15;
-        float maxTempPosition = centerX - mMaxTempPaint.measureText(maxTempString) / 2;
-        float minTempPosition = centerX + mMaxTempPaint.measureText(maxTempString) / 2 + 15;
-        canvas.drawBitmap(resizedBitmap, imgPosition, mYOffset + 64, new Paint());
-        // MaxTemp
-        canvas.drawText(maxTempString, maxTempPosition,
-            60 + mYOffset + 40, mMaxTempPaint);
-        // MinTemp
-        canvas.drawText(minTempString, minTempPosition,
-            60 + mYOffset + 40, mMinTempPaint);
-      }
+      canvas.drawText(maxTemperatureString, x1,
+          mLineYOffset + 2 * mSpacing - (drawableWeatherBitmap.getHeight() / 4f), mMaxTemperaturePaint);
+      canvas.drawText(minTemperatureString, x1 + mMaxTemperaturePaint.measureText(maxTemperatureString) * 1.5f,
+          mLineYOffset + 2 * mSpacing - (drawableWeatherBitmap.getHeight() / 4f), mMinTemperaturePaint);
     }
 
     /**
@@ -511,9 +361,6 @@ public class SunshineWatchFaceService extends CanvasWatchFaceService {
      * or stops it if it shouldn't be running but currently is.
      */
     private void updateTimer() {
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "updateTimer");
-      }
       mUpdateTimeHandler.removeMessages(MSG_UPDATE_TIME);
       if (shouldTimerBeRunning()) {
         mUpdateTimeHandler.sendEmptyMessage(MSG_UPDATE_TIME);
@@ -528,131 +375,92 @@ public class SunshineWatchFaceService extends CanvasWatchFaceService {
       return isVisible() && !isInAmbientMode();
     }
 
-    private void updateConfigDataItemAndUiOnStartup() {
-      SunshineWatchFaceUtility.fetchConfigDataMap(mGoogleApiClient,
-          new SunshineWatchFaceUtility.FetchConfigDataMapCallback() {
-            @Override
-            public void onConfigDataMapFetched(DataMap startupConfig) {
-              // If the DataItem hasn't been created yet or some keys are missing,
-              // use the default values.
-              setDefaultValuesForMissingConfigKeys(startupConfig);
-              SunshineWatchFaceUtility.putConfigDataItem(mGoogleApiClient, startupConfig);
-
-              updateUiForConfigDataMap(startupConfig);
-            }
-          }
-      );
-    }
-
-    private void setDefaultValuesForMissingConfigKeys(DataMap config) {
-      addIntKeyIfMissing(config, SunshineWatchFaceUtility.KEY_BACKGROUND_COLOR,
-          getResources().getColor(R.color.primary));
-      addIntKeyIfMissing(config, SunshineWatchFaceUtility.KEY_HOURS_COLOR,
-          SunshineWatchFaceUtility.COLOR_VALUE_DEFAULT_AND_AMBIENT_HOUR_DIGITS);
-      addIntKeyIfMissing(config, SunshineWatchFaceUtility.KEY_MINUTES_COLOR,
-          SunshineWatchFaceUtility.COLOR_VALUE_DEFAULT_AND_AMBIENT_MINUTE_DIGITS);
-      addIntKeyIfMissing(config, SunshineWatchFaceUtility.KEY_SECONDS_COLOR,
-          SunshineWatchFaceUtility.COLOR_VALUE_DEFAULT_AND_AMBIENT_SECOND_DIGITS);
-    }
-
-    private void addIntKeyIfMissing(DataMap config, String key, int color) {
-      if (!config.containsKey(key)) {
-        config.putInt(key, color);
-      }
-    }
-
-    //        http://catinean.com/2015/03/28/creating-a-watch-face-with-android-wear-api-part-2/
-    @Override // DataApi.DataListener
-    public void onDataChanged(DataEventBuffer dataEvents) {
-      Log.d(TAG, "onDataChanged");
-      for (DataEvent dataEvent : dataEvents) {
-
-        DataItem dataItem = dataEvent.getDataItem();
-
-        if (dataEvent.getType() != DataEvent.TYPE_CHANGED) {
-          DataItem item = dataEvent.getDataItem();
-          if (dataItem.getUri().getPath().equals(KEY_PATH)) {
-            processConfigurationFor(item);
-          }
-        }
-      }
-    }
-
-    private void processConfigurationFor(DataItem dataItem) {
-      Log.d(TAG, "processConfigurationFor");
-      DataMap dataMap = DataMapItem.fromDataItem(dataItem).getDataMap();
-      int weatherId = dataMap.getInt(KEY_WEATHER_ID);
-      if (weatherId != 0) {
-        mWeatherImage = BitmapFactory.decodeResource(getResources(),
-            SunshineWatchFaceUtility.getArtResourceForWeatherCondition(weatherId));
-      }
-      if (mWeatherImage == null) {
-        mWeatherImage = BitmapFactory.decodeResource(getResources(),
-            R.mipmap.ic_launcher);
-      }
-      mWeatherMaxTemp = dataMap.getString(KEY_MAX_TEMP);
-      mWeatherMinTemp = dataMap.getString(KEY_MIN_TEMP);
-    }
-
-    private void updateUiForConfigDataMap(final DataMap config) {
-      boolean uiUpdated = false;
-      for (String configKey : config.keySet()) {
-        if (!config.containsKey(configKey)) {
-          continue;
-        }
-        int color = config.getInt(configKey);
-        if (Log.isLoggable(TAG, Log.DEBUG)) {
-          Log.d(TAG, "Found watch face config key: " + configKey + " -> "
-              + Integer.toHexString(color));
-        }
-        if (updateUiForKey(configKey, color)) {
-          uiUpdated = true;
-        }
-      }
-      if (uiUpdated) {
-        invalidate();
-      }
-    }
-
     /**
-     * Updates the color of a UI item according to the given {@code configKey}. Does nothing if
-     * {@code configKey} isn't recognized.
-     *
-     * @return whether UI has been updated
+     * Handle updating the time periodically in interactive mode.
      */
-    private boolean updateUiForKey(String configKey, int color) {
-      if (configKey.equals(SunshineWatchFaceUtility.KEY_HOURS_COLOR)) {
-        setInteractiveHourDigitsColor(color);
-      } else if (configKey.equals(SunshineWatchFaceUtility.KEY_MINUTES_COLOR)) {
-        setInteractiveMinuteDigitsColor(color);
-      } else {
-        Log.w(TAG, "Ignoring unknown config key: " + configKey);
-        return false;
+    private void handleUpdateTimeMessage() {
+      invalidate();
+      if (shouldTimerBeRunning()) {
+        long timeMs = System.currentTimeMillis();
+        long delayMs = INTERACTIVE_UPDATE_RATE_MS
+            - (timeMs % INTERACTIVE_UPDATE_RATE_MS);
+        mUpdateTimeHandler.sendEmptyMessageDelayed(MSG_UPDATE_TIME, delayMs);
       }
-      return true;
     }
 
-    @Override  // GoogleApiClient.ConnectionCallbacks
-    public void onConnected(Bundle connectionHint) {
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onConnected: " + connectionHint);
+    // DataItem retrieval and processing
+    @Override
+    public void onDataChanged(DataEventBuffer dataEventBuffer) {
+      Log.i(TAG, "onDataChanged: Called");
+      for (DataEvent event : dataEventBuffer) {
+        DataItem item = event.getDataItem();
+        if (WEATHER_DATA_PATH.equals(item.getUri().getPath())) {
+          DataMap weatherDataMap = DataMapItem.fromDataItem(item).getDataMap();
+          int weatherId = (int) weatherDataMap.getLong(KEY_WEATHER_ID);
+          if (weatherId != 0) {
+            mWeatherBitmap = BitmapFactory.decodeResource(getResources(),
+                getSmallArtResourceIdForWeatherCondition(weatherId));
+          }
+          if (mWeatherBitmap == null) {
+            mWeatherBitmap = BitmapFactory.decodeResource(getResources(),
+                R.mipmap.ic_launcher);
+          }
+          mMaxTemperatureString = weatherDataMap.getString(KEY_MAX_TEMPERATURE);
+          mMinTemperatureString = weatherDataMap.getString(KEY_MIN_TEMPERATURE);
+          invalidate();
+        }
       }
-      Wearable.DataApi.addListener(mGoogleApiClient, Engine.this);
-      updateConfigDataItemAndUiOnStartup();
     }
 
-    @Override  // GoogleApiClient.ConnectionCallbacks
+    @Override
+    public void onConnected(Bundle bundle) {
+      Log.d(TAG, "onConnected");
+      Wearable.DataApi.addListener(mGoogleApiClient, this);
+    }
+
+    @Override
     public void onConnectionSuspended(int cause) {
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onConnectionSuspended: " + cause);
-      }
+      Log.d(TAG, "onConnectionSuspended");
     }
 
-    @Override  // GoogleApiClient.OnConnectionFailedListener
-    public void onConnectionFailed(ConnectionResult result) {
-      if (Log.isLoggable(TAG, Log.DEBUG)) {
-        Log.d(TAG, "onConnectionFailed: " + result);
-      }
+    @Override
+    public void onConnectionFailed(ConnectionResult connectionResult) {
+      Log.d(TAG, "onConnectionFailed: " + connectionResult.getErrorMessage());
     }
+
+    private int getSmallArtResourceIdForWeatherCondition(int weatherId) {
+
+      if (weatherId >= 200 && weatherId <= 232) {
+        return R.drawable.ic_storm;
+      } else if (weatherId >= 300 && weatherId <= 321) {
+        return R.drawable.ic_light_rain;
+      } else if (weatherId >= 500 && weatherId <= 504) {
+        return R.drawable.ic_rain;
+      } else if (weatherId == 511) {
+        return R.drawable.ic_snow;
+      } else if (weatherId >= 520 && weatherId <= 531) {
+        return R.drawable.ic_rain;
+      } else if (weatherId >= 600 && weatherId <= 622) {
+        return R.drawable.ic_snow;
+      } else if (weatherId >= 701 && weatherId <= 761) {
+        return R.drawable.ic_fog;
+      } else if (weatherId == 761 || weatherId == 771 || weatherId == 781) {
+        return R.drawable.ic_storm;
+      } else if (weatherId == 800) {
+        return R.drawable.ic_clear;
+      } else if (weatherId == 801) {
+        return R.drawable.ic_light_clouds;
+      } else if (weatherId >= 802 && weatherId <= 804) {
+        return R.drawable.ic_cloudy;
+      } else if (weatherId >= 900 && weatherId <= 906) {
+        return R.drawable.ic_storm;
+      } else if (weatherId >= 958 && weatherId <= 962) {
+        return R.drawable.ic_storm;
+      } else if (weatherId >= 951 && weatherId <= 957) {
+        return R.drawable.ic_clear;
+      }
+      return R.drawable.ic_storm;
+    }
+
   }
 }

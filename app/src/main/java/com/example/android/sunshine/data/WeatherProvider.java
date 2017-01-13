@@ -23,6 +23,7 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
 import android.support.annotation.NonNull;
+import android.util.Log;
 
 import com.example.android.sunshine.utilities.SunshineDateUtils;
 
@@ -223,7 +224,8 @@ public class WeatherProvider extends ContentProvider {
                  * path segment. In the comment above, the last path segment is 1472214172 and
                  * represents the number of seconds since the epoch, or UTC time.
                  */
-                String normalizedUtcDateString = uri.getLastPathSegment();
+                String normalizedUtcDateString = String.valueOf(SunshineDateUtils.normalizeDate(
+                    Long.parseLong(uri.getLastPathSegment())));
 
                 /*
                  * The query method accepts a string array of arguments, as there may be more

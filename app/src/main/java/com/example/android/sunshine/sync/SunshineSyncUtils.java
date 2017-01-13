@@ -20,9 +20,7 @@ import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.support.annotation.NonNull;
-import android.util.Log;
 
-import com.example.android.sunshine.WearService;
 import com.example.android.sunshine.data.WeatherContract;
 import com.firebase.jobdispatcher.Constraint;
 import com.firebase.jobdispatcher.Driver;
@@ -190,18 +188,5 @@ public class SunshineSyncUtils {
     public static void startImmediateSync(@NonNull final Context context) {
         Intent intentToSyncImmediately = new Intent(context, SunshineSyncIntentService.class);
         context.startService(intentToSyncImmediately);
-    }
-
-    /**
-     * Sends an update intent to WearService.
-     * WearService then update SunshineWatchFaceService with the current weather.
-     *
-     * @param context Context used to get the intent
-     */
-    static public void updateWatchFace(Context context) {
-        Log.d("SunshineSyncUtils", "2");
-        Intent intent = new Intent(context, WearService.class);
-        intent.setAction(WearService.ACTION_UPDATE_WATCHFACE);
-        context.startService(intent);
     }
 }

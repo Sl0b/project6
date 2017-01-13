@@ -2,13 +2,10 @@
 <resources>
     <dimen name="digital_text_size">40dp</dimen>
     <dimen name="digital_text_size_round">45dp</dimen>
-    <dimen name="digital_date_text_size">16dp</dimen>
-    <dimen name="digital_temp_size">25dp</dimen>
-    <dimen name="digital_temp_size_round">30dp</dimen>
-    <dimen name="digital_x_offset">15dp</dimen>
-    <dimen name="digital_x_offset_round">25dp</dimen>
+    <dimen name="digital_x_offset">25dp</dimen>
+    <dimen name="digital_x_offset_round">50dp</dimen>
     <dimen name="digital_y_offset">80dp</dimen>
-    <dimen name="digital_line_height">25dp</dimen>
-    <dimen name="digital_config_color_picker_item_margin">32dp</dimen>
-    <dimen name="content_padding_start">12dp</dimen>
+    <dimen name="spacing_y_offset">20dp</dimen>
+    <dimen name="weather_image_width">30dp</dimen>
+    <dimen name="weather_image_height">30dp</dimen>
 </resources>

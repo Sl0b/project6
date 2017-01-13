@@ -242,4 +242,20 @@ public final class SunshinePreferences {
         editor.putLong(lastNotificationKey, timeOfNotification);
         editor.apply();
     }
+
+    public static boolean isWearUpToDate(Context context, String newWeather) {
+        String lastWeatherUpdateKey = context.getString(R.string.pref_last_wear_update);
+        SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(context);
+        String lastWeather = sp.getString(lastWeatherUpdateKey, "");
+
+        return lastWeather.equals(newWeather);
+    }
+
+    public static void saveWearUpdateValues(Context context, String newWeather) {
+        SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(context);
+        SharedPreferences.Editor editor = sp.edit();
+        String lastWeatherUpdateKey = context.getString(R.string.pref_last_wear_update);
+        editor.putString(lastWeatherUpdateKey, newWeather);
+        editor.apply();
+    }
 }
