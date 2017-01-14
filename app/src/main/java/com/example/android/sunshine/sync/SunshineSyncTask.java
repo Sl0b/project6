@@ -45,9 +45,9 @@ public class SunshineSyncTask {
 
     private static final String TAG = "SyncTaskUtils";
 
-    private static final String KEY_WEATHER_ID = "WEATHER_ID";
-    private static final String KEY_MAX_TEMPERATURE = "MAX_TEMPERATURE";
-    private static final String KEY_MIN_TEMPERATURE = "MIN_TEMPERATURE";
+    private static final String KEY_WEATHER_ID = "/WEATHER_ID";
+    private static final String KEY_MAX_TEMPERATURE = "/MAX_TEMPERATURE";
+    private static final String KEY_MIN_TEMPERATURE = "/MIN_TEMPERATURE";
     private static final String WEATHER_DATA_PATH = "/WEATHER_DATA_PATH";
 
     public static final String[] WEATHER_NOTIFICATION_PROJECTION = {
@@ -102,6 +102,11 @@ public class SunshineSyncTask {
                         WeatherContract.WeatherEntry.CONTENT_URI,
                         weatherValues);
 
+                /* We have new weather, so if googleApiClient is connected we send it to the watch */
+                if (MainActivity.mGoogleApiClient.isConnected()) {
+                    sendWeatherToWatchFace(context);
+                }
+
                 /*
                  * Finally, after we insert data into the ContentProvider, determine whether or not
                  * we should notify the user that the weather has been refreshed.
@@ -140,17 +145,16 @@ public class SunshineSyncTask {
         }
     }
 
+    /**
+     * Send data to wear, as this is called from syncWeather we know that we have new data and
+     * that the googleApiClient is connected as this was a condition.
+     *
+     * @param context Used to access utility methods and the ContentResolver
+     */
     public static void sendWeatherToWatchFace(Context context) {
         Uri weatherUri = WeatherContract.WeatherEntry.buildWeatherUriWithDate(System.currentTimeMillis());
         Cursor cursor = context.getContentResolver().query(weatherUri, WEATHER_NOTIFICATION_PROJECTION, null,
             null, null);
-        if (cursor == null) {
-            return;
-        }
-        if (!cursor.moveToFirst()) {
-            cursor.close();
-            return;
-        }
 
         int weatherId = cursor.getInt(INDEX_WEATHER_ID);
         String high = String.valueOf((int) Math.round(cursor.getDouble(INDEX_MAX_TEMP)));

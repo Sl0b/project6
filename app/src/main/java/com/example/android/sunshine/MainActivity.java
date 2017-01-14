@@ -167,9 +167,6 @@ public class MainActivity extends AppCompatActivity implements
             .addConnectionCallbacks(this)
             .addOnConnectionFailedListener(this)
             .build();
-
-        mGoogleApiClient.connect();
-
     }
 
     /**
@@ -373,15 +370,20 @@ public class MainActivity extends AppCompatActivity implements
     }
 
     @Override
-    protected void onDestroy() {
-        super.onDestroy();
+    protected void onStart() {
+        super.onStart();
+        mGoogleApiClient.connect();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
         mGoogleApiClient.disconnect();
     }
 
     @Override
     public void onConnected(Bundle bundle) {
         Log.d(TAG, "onConnected");
-        SunshineSyncTask.sendWeatherToWatchFace(this);
     }
 
     @Override
