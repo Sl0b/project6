@@ -45,7 +45,7 @@ public class SunshineSyncTask {
 
     private static final String TAG = "SyncTaskUtils";
 
-    private static final String KEY_WEATHER_ID = "/WEATHER_ID";
+    private static final String KEY_WEATHER_ID = "WEATHER_ID";
     private static final String KEY_MAX_TEMPERATURE = "/MAX_TEMPERATURE";
     private static final String KEY_MIN_TEMPERATURE = "/MIN_TEMPERATURE";
     private static final String WEATHER_DATA_PATH = "/WEATHER_DATA_PATH";
@@ -155,6 +155,14 @@ public class SunshineSyncTask {
         Uri weatherUri = WeatherContract.WeatherEntry.buildWeatherUriWithDate(System.currentTimeMillis());
         Cursor cursor = context.getContentResolver().query(weatherUri, WEATHER_NOTIFICATION_PROJECTION, null,
             null, null);
+
+        if (cursor == null) {
+            return;
+        }
+        if (!cursor.moveToFirst()) {
+            cursor.close();
+            return;
+        }
 
         int weatherId = cursor.getInt(INDEX_WEATHER_ID);
         String high = String.valueOf((int) Math.round(cursor.getDouble(INDEX_MAX_TEMP)));
